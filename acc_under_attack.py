@@ -8,8 +8,6 @@ from torch.optim import SGD
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils import data
-from datasets import DATASETS
-from tools import helpers, constants
 from torchvision.models import resnet50, resnet18
 #from models.resnet import ResNet18
 from models.vgg import VGG
@@ -23,6 +21,7 @@ parser.add_argument('--data', type=str, required=True)
 parser.add_argument('--root', type=str, required=True)
 parser.add_argument('--n_ensemble', type=str, required=True)
 parser.add_argument('--steps', type=int, required=True)
+parser.add_argument('--num_start', type=str, required=True)
 parser.add_argument('--max_norm', type=str, required=True)
 parser.add_argument('--attack', type=str, default='Linf')
 parser.add_argument('--alpha', type=float)
@@ -32,6 +31,7 @@ opt = parser.parse_args()
 
 opt.max_norm = [float(s) for s in opt.max_norm.split(',')]
 opt.n_ensemble = [int(n) for n in opt.n_ensemble.split(',')]
+opt.num_start = [int(n) for n in opt.num_start.split(',')]
 
 # attack
 if opt.attack == 'Linf':
@@ -223,25 +223,29 @@ for eps in opt.max_norm:
 #        correct[i] = str(c / total)
 #    print(f'training {distortion/batch},' + ','.join(correct))
 #    #print(f'{eps},' + ','.join(correct))
-
-    correct = [0] * len(opt.n_ensemble)
-    total = 0
-    max_iter = 100
-    distortion = 0
-    batch = 0
-    for it, (x, y) in enumerate(testloader):
-        x, y = x.cuda(), y.cuda()
-        #print(x.max(),x.min())
-        x_adv = attack_f(x, y, net, opt.steps, eps, cw=False)
-        pred = ensemble_inference(x_adv)
-        for i, p in enumerate(pred):
-            correct[i] += torch.sum(p.eq(y)).item()
-        total += y.numel()
-        distortion += distance(x_adv, x)
-        batch += 1
-        if it >= max_iter:
-            break
-    for i, c in enumerate(correct):
-        correct[i] = c / total*100
-    #print(f'testing {distortion/batch},' + ','.join(correct))
-    print(correct[0])
+    for k in opt.num_start:
+        correct = 0
+        total = 0
+        max_iter = 100
+        distortion = 0
+        batch = 0
+        for it, (x, y) in enumerate(trainloader):
+            tmp = torch.zeros(x.size(0)).int().cuda()
+            x, y = x.cuda(), y.cuda()
+            #print(x.max(),x.min())
+            for _ in range(k):
+                x_adv = attack_f(x, y, net, opt.steps, eps, cw=False)
+                # pred = ensemble_inference(x_adv)
+                p = net(x_adv).argmax(axis=-1)
+                # for i, p in enumerate(pred):
+                tmp += (p.eq(y)).int()
+            
+            correct += torch.sum(tmp.eq(k)).item()    
+            total += y.numel()
+            # print(correct/total*100)
+            # distortion += distance(x_adv, x)
+            batch += 1
+            if it >= max_iter:
+                break
+    print(k)
+    print(correct/total*100)

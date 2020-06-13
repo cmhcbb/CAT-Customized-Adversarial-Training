@@ -13,7 +13,6 @@ import math
 import os
 import argparse
 from torch.utils import data
-from tools import helpers, constants
 from torchvision.models import resnet50, resnet18, resnet34
 
 
@@ -28,14 +27,14 @@ class FixedRandomSampler(data.sampler.Sampler):
     def __init__(self, data_source, num_samples=None):
         self.data_source = data_source
         print('Training data will be SHUFFLED')
-        self.permutation = torch.randperm(len(data_source)).tolist()
+        self.permutation = torch.randperm(len(data_source))
 
     @property
     def num_samples(self):
         return len(self.data_source)
 
     def resample(self):
-        self.permutation = torch.randperm(len(self.data_source)).tolist()
+        self.permutation = torch.randperm(len(self.data_source))
         return self.permutation
 
     def get_perm(self):
@@ -73,6 +72,7 @@ class FixedRangeSampler(data.sampler.Sampler):
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--steps', required=True, type=int, help='#adv. steps')
+parser.add_argument('--version', required=True, type=int, help='#adv. steps')
 parser.add_argument('--max_norm', required=True, type=float, help='Linf-norm in PGD')
 parser.add_argument('--data', required=True, type=str, help='dataset name')
 parser.add_argument('--model', required=True, type=str, help='model name')
@@ -244,7 +244,11 @@ def train_reg(epoch):
         #print(dis)
         optimizer.zero_grad()
         outputs = net(adv_x)
-        loss = test_criterion(outputs, targets)
+        # loss = test_criterion(outputs, targets)
+        one_hot = torch.zeros((batch_size,n_class)).cuda().scatter(1,targets.view(-1,1),1)
+        log_prb = F.log_softmax(outputs,dim=1)
+        loss = - (one_hot * log_prb).sum()/inputs.size(0)
+
         loss.backward()
         #print(loss)
         optimizer.step()
@@ -258,18 +262,28 @@ def train_reg(epoch):
 def dirilabel(outputs,targets,eps):
     batch_size, n_class = targets.size(0), 10
     #eps = 0.1
-    eps *= 10 
-    eps = eps.view(-1,1).cuda()
+    tmp_eps = eps*10
+    tmp_eps = tmp_eps.view(-1,1).cuda()
 
     one_hot = torch.zeros((batch_size,n_class)).cuda().scatter(1,targets.view(-1,1),1)
     ## here we assume uniform 
     alpha = torch.ones(n_class)
     distri = torch.distributions.Dirichlet(alpha) 
     #print(one_hot.shape,eps.shape)
-    one_hot_so = one_hot*(1-eps) + distri.rsample(sample_shape=(batch_size,)).cuda()*eps/n_class
+    one_hot_so = one_hot*(1-tmp_eps) + distri.rsample(sample_shape=(batch_size,)).cuda()*tmp_eps
     return one_hot_so, one_hot
 
+def uniformlabel(outputs,targets,eps):
+    batch_size, n_class = targets.size(0), 10
+    #eps = 0.1
+    eps *= 10 
+    eps = eps.view(-1,1).cuda()
 
+    one_hot = torch.zeros((batch_size,n_class)).cuda().scatter(1,targets.view(-1,1),1)
+    ## here we assume uniform 
+    #print(one_hot.shape,eps.shape)
+    one_hot_so = one_hot*(1-eps) + eps/n_class
+    return one_hot_so, one_hot
 
 def train_soadp(epoch, perm, eps, cw=False):
     print('Epoch: %d' % epoch)
@@ -279,34 +293,51 @@ def train_soadp(epoch, perm, eps, cw=False):
     total = 0 
     batch_size = 128
     zero = torch.tensor([0.0]).cuda()
+    criterion_kl = nn.KLDivLoss(reduction='batchmean')
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         index = perm[batch_idx*batch_size:(batch_idx+1)*batch_size]
         inputs, targets = inputs.cuda(), targets.cuda()    
         #print(targets.shape,index)
         #dis = eps[index]
+        if opt.version == 2:
+            eps[index] += 0.0025
+            eps.clamp_(max=0.035)
+            
         so_targets, one_hot = dirilabel(inputs,targets,eps[index])
+
         #so_targets = targets
-        adv_x = Linf_PGD_so_cw(inputs, so_targets, net, opt.steps, eps[index], one_hot, cw=cw)
+        adv_x, mask, n_mask = Linf_PGD_so_cw(inputs, so_targets, net, opt.steps, eps[index], one_hot, cw=cw, version=opt.version)
         #adv_x = L2_PGD(inputs, targets, net, opt.steps, opt.max_norm)
         #print(dis.shape)
         optimizer.zero_grad()
-        eps[index] = distance(adv_x, inputs)
+        if opt.version == 2:
+            eps[index[mask]] -= 0.0025
+        else:
+            eps[index] = distance(adv_x, inputs)
+            # eps[index[mask]]
         outputs = net(adv_x)
         #loss = AdaptiveLoss(outputs, targets, dis)
         so_targets, one_hot = dirilabel(inputs,targets,eps[index])
         if cw:
             real = torch.max(outputs*one_hot -(1-one_hot)*100000, dim=1)[0]
             other = torch.max(torch.mul(outputs, (1-one_hot))-one_hot*100000, 1)[0]
-            loss1 = torch.max(other- real+50, zero)
+            loss1 = torch.max(other- real+10, zero)
             loss1 = torch.sum(loss1 * eps[index])
             log_prb = F.log_softmax(outputs,dim=1)
             #print(log_prb.shape, y_true.shape)
+            # loss2 = - (so_targets * log_prb).sum()/inputs.size(0)
+            # print(one_hot)
             loss2 = - (so_targets * log_prb).sum()/inputs.size(0)
+            # loss2 = criterion_kl(log_prb, so_targets)
+
             loss = loss1 + loss2
             #loss = torch.sum(loss1)
         else:
+
             log_prb = F.log_softmax(outputs,dim=1)
             #print(log_prb.shape, y_true.shape)
+            #loss = - (so_targets * log_prb).sum()/inputs.size(0)
+
             loss = - (so_targets * log_prb).sum()/inputs.size(0)
             #loss = test_criterion(outputs, targets)
         loss.backward()
@@ -328,7 +359,7 @@ def test_attack(cw):
     for it, (x, y) in enumerate(testloader):
         x, y = x.cuda(), y.cuda()
         x_adv = Linf_PGD(x, y, net, 5, eps, cw=cw)
-        pred = torch.max(net(x_adv)[0],dim=1)[1]
+        pred = torch.max(net(x_adv),dim=1)[1]
         correct += torch.sum(pred.eq(y)).item()
         total += y.numel()
         batch += 1
@@ -362,12 +393,12 @@ def test(epoch):
 
     #acc = 100.*correct /total
 
-    if epoch>60:
-        acc = test_attack(True)
-        if acc> best_acc_ce:
-            best_acc_ce = acc
-            model_out = opt.model_out + "best"
-            torch.save(net.state_dict(), model_out)        
+    # if epoch>60:
+    #     acc = test_attack(True)
+    #     if acc> best_acc_ce:
+    #         best_acc_ce = acc
+    #         model_out = opt.model_out + "best"
+    #         torch.save(net.state_dict(), model_out)        
     # if acc> best_acc_ce:
     #     best_acc_ce = acc
     #     model_out = opt.model_out + "best"
@@ -378,7 +409,7 @@ def test(epoch):
 
 
 if opt.data == 'cifar10':
-    epochs = [80, 60, 40, 20]
+    epochs = [20, 20, 20, 20]
 elif opt.data == 'corrupt_cifar10':
     epochs = [80, 60, 40, 20]
 elif opt.data == 'restricted_imagenet':
@@ -388,16 +419,17 @@ elif opt.data == 'tiny_imagenet':
 elif opt.data == 'stl10':
     epochs = [60, 40, 20]
 count = 0
-eps = torch.zeros(1000000).cuda() 
+eps = torch.zeros(50000).cuda() 
 
 for epoch in epochs:
     optimizer = SGD(net.parameters(), lr=opt.lr, momentum=0.9, weight_decay=5.0e-4)
     for it in range(epoch):
+        print(eps)
         train_perm = train_sampler.get_perm()
         #train_natrual(count)
         train_soadp(count,train_perm,eps, cw=True)
         #train_cwadp(count,train_perm,eps, cw=True)
-        #train_reg(count)
+        # train_reg(count)
         test(count)
         count += 1  
         train_sampler.resample()

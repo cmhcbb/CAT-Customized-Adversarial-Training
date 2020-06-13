@@ -14,6 +14,15 @@ def random_start(x,eps):
     x.clamp_(0,1)
     return x
 
+def random_start_adp(x,eps):
+    eps = eps.view(-1,1,1,1).expand_as(x).cpu()
+    noise = 2 * torch.rand(x.size()) * eps - eps * torch.ones(x.size())
+    noise = noise.cuda()
+    x+=noise
+    x.clamp_(0,1)
+    return x
+
+
 def Linf_PGD(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw=False):
     if eps == 0:
         return x_nat
@@ -36,7 +45,7 @@ def Linf_PGD(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw=Fa
             out = net(x_adv)
         if cw:
             index = y_true.cpu().view(-1, 1)
-            label_onehot = torch.FloatTensor(x_in.size(0), 200).zero_().scatter_(1, index, 1).cuda()
+            label_onehot = torch.FloatTensor(x_in.size(0), 10).zero_().scatter_(1, index, 1).cuda()
             real = torch.max(out*label_onehot -(1-label_onehot)*100000, dim=1)[0]
             #real = torch.sum(out*label_onehot, dim=1)
             other = torch.max(torch.mul(out, (1-label_onehot))-label_onehot*100000, 1)[0]
@@ -251,6 +260,7 @@ def Linf_PGD_so(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw
         net.eval()
     x_in = x_nat.clone()
     x_adv = x_in.clone()
+
     x_adv.requires_grad=True
     optimizer = Linf_SGD([x_adv], lr=0.007)
     eps += 0.005
@@ -304,7 +314,7 @@ def Linf_PGD_so(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw
 
 
 
-def Linf_PGD_so_cw(x_nat, y_true, net, steps, eps, one_hot, imagenet=False, random=False, cw=False):
+def Linf_PGD_so_cw(x_nat, y_true, net, steps, eps, one_hot, imagenet=False, random=False, cw=False, version=1):
     #mask = torch.LongTensor(x_nat.size(0)).cuda().zero_() 
     #eps_l = np.arange(0.005,0.03,0.005)  
     training = net.training
@@ -312,14 +322,18 @@ def Linf_PGD_so_cw(x_nat, y_true, net, steps, eps, one_hot, imagenet=False, rand
         net.eval()
     x_in = x_nat.clone()
     x_adv = x_in.clone()
+    # x_adv = random_start_adp(x_in,eps)
+    x_adv = x_adv.detach()
     x_adv.requires_grad=True
-    optimizer = Linf_SGD([x_adv], lr=0.002)
-    eps += 0.0025
-    eps.clamp_(max=0.03)
+    optimizer = Linf_SGD([x_adv], lr=0.007)
+    if version==1:
+        eps += 0.03
+        eps.clamp_(max=0.06)
     #sorted_eps, perm = torch.sort(eps)
     #for eps in eps_l:
     x_adv.data = x_nat.data.clone()
     zero = torch.tensor([0.0]).cuda()
+    criterion_kl = nn.KLDivLoss(reduction='batchmean')
     for _ in range(steps):
         optimizer.zero_grad()
         net.zero_grad()
@@ -330,11 +344,13 @@ def Linf_PGD_so_cw(x_nat, y_true, net, steps, eps, one_hot, imagenet=False, rand
         if cw:
             real = torch.max(out*one_hot -(1-one_hot)*100000, dim=1)[0]
             other = torch.max(torch.mul(out, (1-one_hot))-one_hot*10000, 1)[0]
-            loss1 = torch.max(real - other+50, zero)
+            loss1 = torch.max(real - other+10, zero)
             loss1 = torch.sum(loss1 * eps)
             log_prb = F.log_softmax(out,dim=1)
             #print(log_prb.shape, y_true.shape)
             loss2 = (y_true * log_prb).sum()/x_adv.size(0)
+            # loss2 = criterion_kl(log_prb, y_true)
+            
             loss = loss1 + loss2
         else:
             log_prb = F.log_softmax(out,dim=1)
@@ -358,12 +374,18 @@ def Linf_PGD_so_cw(x_nat, y_true, net, steps, eps, one_hot, imagenet=False, rand
         else:
             x_adv.detach().copy_((diff + x_nat).clamp_(0, 1))
     net.zero_grad()
+    n_mask = (torch.max(net(x_adv),dim=1)[1] != torch.max(y_true,dim=1)[1])
     mask = (torch.max(net(x_adv),dim=1)[1] == torch.max(y_true,dim=1)[1])
-    if mask is None:
-        return x_in
-    x_in.data[mask] = x_adv.data[mask]
+    # if mask is None:
+    #     return x_in, None
         #print(distance(x_in,x_nat))
     # reset to the original state
     if training:
         net.train()
-    return x_in
+    if version == 2:
+        x_in.data = x_adv.data
+        return x_in, mask, None
+    else:
+        # x_in.data[mask] = x_adv.data[mask]
+        x_in.data[n_mask] = x_adv.data[n_mask]
+        return x_in, mask, n_mask
