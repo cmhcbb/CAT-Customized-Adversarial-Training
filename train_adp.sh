@@ -12,7 +12,7 @@ data=cifar10
 root=data
 #root=tiny_imagenet
 cp=0.1
-model=wide_resnet
+model=wide_resnet_trades,wide_resnet,wide_resnet
 #model=aaron
 # model=vgg
 #model=resnet
@@ -21,7 +21,7 @@ model=wide_resnet
 version=2
 model_out=./checkpoint/${data}_${model}_v${version}_mix_mix_last_10
 echo "model_out: " ${model_out}
-CUDA_VISIBLE_DEVICES=0 python ./main_adv_cus.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python ./main_adv_cus.py \
                         --lr ${lr} \
                         --data ${data} \
                         --model ${model} \
@@ -31,4 +31,5 @@ CUDA_VISIBLE_DEVICES=0 python ./main_adv_cus.py \
                         --model_out ${model_out}.pth \
                         --corruption_prob ${cp} \
                         --train_sampler true \
-                        --version ${version}
+                        --version ${version} \
+                        --model_dir 

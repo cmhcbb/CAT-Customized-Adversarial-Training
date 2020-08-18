@@ -43,6 +43,8 @@ def Linf_PGD(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw=Fa
             out = net(x_adv)
         else:
             out = net(x_adv)
+        if (type(out)) is tuple:
+            out,_ = out
         if cw:
             index = y_true.cpu().view(-1, 1)
             label_onehot = torch.FloatTensor(x_in.size(0), 10).zero_().scatter_(1, index, 1).cuda()
@@ -74,6 +76,7 @@ def Linf_PGD(x_nat, y_true, net, steps, eps, imagenet=False, random=False, cw=Fa
     # reset to the original state
     if training:
         net.train()
+    _ = net(x_adv)
     return x_adv
 
 def L2_PGD(x_in, y_true, net, steps, eps):
