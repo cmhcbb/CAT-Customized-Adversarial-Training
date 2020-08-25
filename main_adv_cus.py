@@ -22,7 +22,7 @@ from attacker.pgd import Linf_PGD_new
 from attacker.pgd import L2_PGD
 from attacker.pgd import Linf_PGD_so
 from attacker.pgd import Linf_PGD_so_cw
-from attacker.perform_attack import perform_attack,attack_pgd
+from attacker.perform_attack import attack_pgd
 
 class FixedRandomSampler(data.sampler.Sampler):
     def __init__(self, data_source, num_samples=None):
@@ -84,13 +84,20 @@ parser.add_argument('--train_sampler', action='store', help='Resume training')
 parser.add_argument('--resume_from', type=str,  help='Resume training')
 parser.add_argument('--model_dir', type=str,  help='pre_trained_models')
 parser.add_argument('--corruption_prob', '-cprob', type=float, default=0.3, help='The label corruption probability.')
+parser.add_argument('--resuming', type=int, required=True,  help='1 if resuming from some partially trained model')
+parser.add_argument('--resuming_model_dir', type=str,  help='pre_trained_models')
 opt = parser.parse_args()
 
 
-opt.model_dir = [str(s) for s in opt.model_dir.split(',')]
+if (opt.model_dir) is not None:
+    opt.model_dir = [str(s) for s in opt.model_dir.split(',')]
 opt.model = [str(s) for s in opt.model.split(',')]
 
-assert len(opt.model) >= len(opt.model_dir)
+if (opt.model_dir) is not None:
+    assert len(opt.model) >= len(opt.model_dir)
+
+if opt.resuming:
+    opt.resuming_model_dir = [str(s) for s in opt.resuming_model_dir.split(',')]
 
 # Data
 print('==> Preparing data..')
@@ -107,8 +114,8 @@ if opt.data == 'cifar10':
     ])
     trainset = torchvision.datasets.CIFAR10(root=opt.root, train=True, download=True, transform=transform_train)
     if opt.train_sampler:
-        trainloader = torch.utils.data.DataLoader(trainset, batch_size=64, 
-            shuffle=False, num_workers=2, pin_memory=True, sampler = FixedRandomSampler(trainset))    
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+            shuffle=False, num_workers=2, pin_memory=True, sampler = FixedRandomSampler(trainset))
     else:
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
             shuffle=True, pin_memory=True, num_workers=2)
@@ -131,7 +138,7 @@ elif opt.data == 'tiny_imagenet':
     trainset = torchvision.datasets.ImageFolder(os.path.join(opt.root, 'train'), transform=transform_train)
     if opt.train_sampler:
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=False, num_workers=2, pin_memory=True, sampler = FixedRandomSampler(trainset))
-    else:    
+    else:
         trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=2)
     train_sampler = trainloader.sampler
 
@@ -154,22 +161,24 @@ else:
 nets = []
 # Model
 for n in opt.model:
-    if opt.model == 'vgg':
+    #print("n is: " + n)
+    if n == 'vgg':
         from models.vgg import VGG
         net = nn.DataParallel(VGG('VGG16', nclass, img_width=img_width).cuda())
-    elif opt.model == 'aaron':
+    elif n == 'aaron':
         from models.aaron import Aaron
         net = nn.DataParallel(Aaron(nclass).cuda())
-    elif opt.model == 'wide_resnet':
+    elif n == 'wide_resnet':
+        print("n is: " + n)
         from models.wideresnet import *
         net= nn.DataParallel(WideResNet(widen_factor=10).cuda())
-    elif opt.model == 'resnet':
+    elif n == 'resnet':
         model_ft = resnet50(pretrained=False,num_classes=10)
         num_ftrs = model_ft.fc.in_features
         model_ft.fc = nn.Linear(num_ftrs, 10)
         net = model_ft.cuda()
         net= nn.DataParallel(net)
-    elif opt.model == 'resnet18':
+    elif n == 'resnet18':
         model = resnet18()
         model.conv1 = nn.Conv2d(3,64, kernel_size=(3,3), stride=(1,1), padding=(1,1), bias=False)
         model.maxpool = nn.Sequential()
@@ -177,7 +186,7 @@ for n in opt.model:
         model.fc = torch.nn.Linear(in_features=512,out_features=200,bias=True)
         net = model.cuda()
         net= nn.DataParallel(net)
-    elif opt.model == 'resnet34':
+    elif n == 'resnet34':
         model = resnet34()
         model.conv1 = nn.Conv2d(3,64, kernel_size=(3,3), stride=(1,1), padding=(1,1), bias=False)
         model.maxpool = nn.Sequential()
@@ -185,7 +194,7 @@ for n in opt.model:
         model.fc = torch.nn.Linear(in_features=512,out_features=200,bias=True)
         net = model.cuda()
         net= nn.DataParallel(net)
-    elif opt.model == 'resnet50':
+    elif n == 'resnet50':
         model = resnet50()
         model.conv1 = nn.Conv2d(3,64, kernel_size=(3,3), stride=(1,1), padding=(1,1), bias=False)
         model.maxpool = nn.Sequential()
@@ -270,6 +279,29 @@ if opt.model_dir is not None:
             except:
                 nets[i] = nn.DataParallel(nets[i])
                 nets[i].load_state_dict(torch.load(opt.model_dir[i]))
+if opt.resuming:
+    if opt.model_dir is None:
+        assert len(opt.resuming_model_dir) == 3
+    else:
+        assert len(opt.resuming_model_dir) == 1
+
+if opt.resuming:
+    if opt.model_dir is None:
+        for i in range(len(opt.resuming_model_dir)):
+            print('Loading '+f'{opt.resuming_model_dir[i]}')
+            try:
+                nets[i].load_state_dict(torch.load(opt.resuming_model_dir[i]))
+            except:
+                nets[i] = nn.DataParallel(nets[i])
+                nets[i].load_state_dict(torch.load(opt.resuming_model_dir[i]))
+    else:
+        print('Loading '+f'{opt.resuming_model_dir[0]}')
+        try:
+            nets[-1].load_state_dict(torch.load(opt.resuming_model_dir[0]))
+        except:
+            nets[-1] = nn.DataParallel(nets[-1])
+            nets[-1].load_state_dict(torch.load(opt.resuming_model_dir[0]))
+
 
 # from torch.autograd import Variable
 import copy
@@ -293,15 +325,17 @@ class EnsembleNet(nn.Module):
             for n in range(len(self.nets)):
                 self.nets[n].train()
 
-        '''
         # For ensemble using sum of logits:
         logits = self.nets[0](x_in)
+        if (type(logits)) is tuple:
+            logits=logits[0]
         for n in range(1, len(self.nets)):
             p = self.nets[n](x_in)
+            if (type(p)) is tuple:
+                p=p[0]
             logits.add_(p)
 
         return logits
-        '''
 
         """
         # For ensemble using median of sorted logits:
@@ -319,7 +353,10 @@ class EnsembleNet(nn.Module):
         """
 
 
+        '''
         logits = self.nets[0](x_in)
+        if (type(logits)) is tuple:
+            logits = logits[0]
         #print(logits)
         class_ = torch.zeros((x_in.size(0),10)).cuda()
         class_[torch.tensor(range(x_in.size(0))), torch.max(logits, dim=1)[1]]+=1
@@ -327,6 +364,8 @@ class EnsembleNet(nn.Module):
 
         for n in range(1, len(self.nets)):
             p = self.nets[n](x_in)
+            if (type(p)) is tuple:
+                p = p[0]
             #print(p)
             class_[torch.tensor(range(x_in.size(0))), torch.max(p, dim=1)[1]]+=1
             p = p.view(logits.size(0), 10, 1)
@@ -355,7 +394,8 @@ class EnsembleNet(nn.Module):
         #print("final logit being returned is:" + str(final_logit))
         #assert 1==2
         return final_logit
-        
+        '''
+
 
     def predict_label(self, x_in):
         out = self.forward(x_in)
@@ -411,7 +451,11 @@ def train_reg(epoch):
     train_loss = 0
     correct = 0
     total = 0
+    batch_size = 64
+    n_class=10
     for batch_idx, (inputs, targets) in enumerate(tqdm(trainloader)):
+        if (batch_idx >=781):
+            break
         inputs, targets = inputs.cuda(), targets.cuda()
         #print(inputs.max(),inputs.min())
         adv_x = Linf_PGD(inputs, targets, ensemble_net, opt.steps, opt.max_norm)
@@ -419,7 +463,12 @@ def train_reg(epoch):
         #adv_x = L2_PGD(inputs, targets, net, opt.steps, opt.max_norm)
         # dis = distance(adv_x, inputs)
         #print(dis)
-        optimizer.zero_grad()
+        if opt.model_dir is None:
+            for n in range(len(ensemble_net.nets)):
+                optimizer[n].zero_grad()
+        else:
+            optimizer[-1].zero_grad()
+
         if opt.model_dir is None:
             outputs = ensemble_net(adv_x)
         else:
@@ -433,8 +482,12 @@ def train_reg(epoch):
         loss = - (one_hot * log_prb).sum()/inputs.size(0)
 
         loss.backward()
-        #print(loss)
-        optimizer.step()
+        if opt.model_dir is None:
+            for n in range(len(ensemble_net.nets)):
+                optimizer[n].step()
+        else:
+            optimizer[-1].step()
+        #optimizer.step()
         pred = torch.max(outputs, dim=1)[1]
         correct += torch.sum(pred.eq(targets)).item()
         total += targets.numel()
@@ -449,9 +502,9 @@ def dirilabel(outputs,targets,eps):
     tmp_eps = tmp_eps.view(-1,1).cuda()
 
     one_hot = torch.zeros((batch_size,n_class)).cuda().scatter(1,targets.view(-1,1),1)
-    ## here we assume uniform 
+    ## here we assume uniform
     alpha = torch.ones(n_class)
-    distri = torch.distributions.Dirichlet(alpha) 
+    distri = torch.distributions.Dirichlet(alpha)
     #print(one_hot.shape,eps.shape)
     one_hot_so = one_hot*(1-tmp_eps) + distri.rsample(sample_shape=(batch_size,)).cuda()*tmp_eps
     return one_hot_so, one_hot
@@ -459,11 +512,11 @@ def dirilabel(outputs,targets,eps):
 def uniformlabel(outputs,targets,eps):
     batch_size, n_class = targets.size(0), 10
     #eps = 0.1
-    eps *= 10 
+    eps *= 10
     eps = eps.view(-1,1).cuda()
 
     one_hot = torch.zeros((batch_size,n_class)).cuda().scatter(1,targets.view(-1,1),1)
-    ## here we assume uniform 
+    ## here we assume uniform
     #print(one_hot.shape,eps.shape)
     one_hot_so = one_hot*(1-eps) + eps/n_class
     return one_hot_so, one_hot
@@ -473,19 +526,19 @@ def train_soadp(epoch, perm, eps, cw=False):
     net.train()
     train_loss = 0
     correct = 0
-    total = 0 
+    total = 0
     batch_size = 128
     zero = torch.tensor([0.0]).cuda()
     criterion_kl = nn.KLDivLoss(reduction='batchmean')
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         index = perm[batch_idx*batch_size:(batch_idx+1)*batch_size]
-        inputs, targets = inputs.cuda(), targets.cuda()    
+        inputs, targets = inputs.cuda(), targets.cuda()
         #print(targets.shape,index)
         #dis = eps[index]
         if opt.version == 2:
             eps[index] += 0.0025
             eps.clamp_(max=0.035)
-            
+
         so_targets, one_hot = dirilabel(inputs,targets,eps[index])
 
         #so_targets = targets
@@ -533,7 +586,7 @@ def train_soadp(epoch, perm, eps, cw=False):
     print(f'[TRAIN] Acc: {100.*correct/total:.3f}')
 
 def test_attack(cw):
-    correct = 0 
+    correct = 0
     total = 0
     #max_iter = 100
     distortion = 0
@@ -546,7 +599,7 @@ def test_attack(cw):
         correct += torch.sum(pred.eq(y)).item()
         total += y.numel()
         batch += 1
-    
+
     correct = str(correct / total)
     #print(f'{distortion/batch},' + ','.join(correct))
     print(f'{eps},' + correct)
@@ -564,11 +617,11 @@ def test(epoch):
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.cuda(), targets.cuda()
             if opt.model_dir is None:
-                outputs = ensemble_net(adv_x)
+                outputs = ensemble_net(inputs)
             else:
                 ensemble_net.nets[-1].train()
-                outputs = ensemble_net.nets[-1](adv_x)
-            
+                outputs = ensemble_net.nets[-1](inputs)
+
             if (type(outputs)) is tuple:
                 outputs = outputs[0]
             #loss = criterion(outputs, targets)
@@ -577,9 +630,9 @@ def test(epoch):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
         print(f'[TEST] Acc: {100.*correct/total:.3f}')
-    
+
     # robust_acc_cw = test_attack(True)
-    
+
 
     #acc = 100.*correct /total
 
@@ -588,7 +641,7 @@ def test(epoch):
     #     if acc> best_acc_ce:
     #         best_acc_ce = acc
     #         model_out = opt.model_out + "best"
-    #         torch.save(net.state_dict(), model_out)        
+    #         torch.save(net.state_dict(), model_out)
     # if acc> best_acc_ce:
     #     best_acc_ce = acc
     #     model_out = opt.model_out + "best"
@@ -599,7 +652,8 @@ def test(epoch):
 
 
 if opt.data == 'cifar10':
-    epochs = [20, 20, 20, 20]
+    #epochs = [20, 20, 20, 20]
+    epochs = [10, 20]
 elif opt.data == 'corrupt_cifar10':
     epochs = [80, 60, 40, 20]
 elif opt.data == 'restricted_imagenet':
@@ -608,11 +662,15 @@ elif opt.data == 'tiny_imagenet':
     epochs = [30, 20, 20, 10]
 elif opt.data == 'stl10':
     epochs = [60, 40, 20]
-count = 0
-eps = torch.zeros(50000).cuda() 
+count = 50
+print("learning rate is: " + str(opt.lr))
+eps = torch.zeros(50000).cuda()
 
 for epoch in epochs:
-    optimizer = SGD(net.parameters(), lr=opt.lr, momentum=0.9, weight_decay=5.0e-4)
+    optimizer = []
+    for n in range(len(ensemble_net.nets)):
+        optimizer.append(SGD(ensemble_net.nets[n].parameters(), lr=opt.lr, momentum=0.9, weight_decay=5.0e-4))
+    #optimizer = SGD(ensemble_net.parameters(), lr=opt.lr, momentum=0.9, weight_decay=5.0e-4)
     for it in range(epoch):
         print(eps)
         train_perm = train_sampler.get_perm()
@@ -626,12 +684,12 @@ for epoch in epochs:
             try:
                 if (opt.model_dir) is None:
                     for n in range(len(opt.model)):
-                        torch.save(ensemble_net.nets[n].state_dict(), "./full_ensemble_PGD_trained_model_"+str(n)+"_epoch_"+str(count))
+                        torch.save(ensemble_net.nets[n].state_dict(), "./full_ensemble_PGD_trained_model_"+str(n)+"_logits_summed_epoch_"+str(count))
                 else:
-                    torch.save(ensemble_net.nets[-1].state_dict(), "./partial_ensemble_PGD_trained_model_epoch_"+str(count))
+                    torch.save(ensemble_net.nets[-1].state_dict(), "./partial_ensemble_PGD_trained_model_logits_summed_epoch_"+str(count))
             except:
                 print("couldn't save the model at epoch:" + str(count))
 
         train_sampler.resample()
     opt.lr /= 10
-    print("opt.lr now is: " + str(opt.lr) ", and next epoch is: " + str(count))
+    print("opt.lr now is: " + str(opt.lr) + ", and next epoch is: " + str(count))
